@@ -1,6 +1,6 @@
 [Setup]
 AppName=Codex Antigravity Bridge
-AppVersion=1.0.0
+AppVersion=1.7.0
 DefaultDirName={pf}\Codex Antigravity Bridge
 DefaultGroupName=Codex Antigravity Bridge
 OutputDir=dist
@@ -23,5 +23,22 @@ Name: "{group}\Uninstall Codex Antigravity Bridge"; Filename: "{uninstallexe}"
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Codex Antigravity Bridge Tray"; ValueData: "{app}\bridge-tray.exe"
 
+[UninstallRun]
+Filename: "taskkill"; Parameters: "/F /IM bridge-tray.exe"; Flags: runhidden; RunOnceId: "KillBridgeTray"
+Filename: "taskkill"; Parameters: "/F /IM codex-antigravity-bridge.exe"; Flags: runhidden; RunOnceId: "KillBridgeDaemon"
+
 [Run]
 Filename: "{app}\bridge-tray.exe"; Description: "Launch Bridge System Tray Icon"; Flags: postinstall nowait
+
+[Code]
+function InitializeSetup(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  // Force kill any running bridge tray and daemon instances to free file locks
+  Exec('taskkill.exe', '/F /IM bridge-tray.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM codex-antigravity-bridge.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  
+  Result := True;
+end;
+
