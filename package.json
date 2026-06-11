@@ -1,0 +1,23 @@
+{
+  "name": "codex-antigravity-bridge",
+  "version": "1.0.0",
+  "description": "Native bridge for connecting Codex Agent Manager to Antigravity.",
+  "main": "antigravity-broker.js",
+  "type": "module",
+  "scripts": {
+    "start": "node antigravity-broker.js",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "codex",
+    "antigravity",
+    "bridge",
+    "agent"
+  ],
+  "author": "Morgan Ross",
+  "license": "MIT",
+  "devDependencies": {
+    "eslint": "^8.56.0",
+    "prettier": "^3.2.5"
+  }
+}
