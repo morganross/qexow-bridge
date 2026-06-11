@@ -56,12 +56,62 @@ namespace BridgeTray
             sb.AppendLine(string.Format("{0} Bridge Tray App: running (PID {1})", "OK ", Process.GetCurrentProcess().Id));
             sb.AppendLine(string.Format("{0} Bridge Daemon ({1}): {2}", isDaemonRunning ? "OK " : "BAD ", ProcessName, daemonDetail));
             sb.AppendLine();
+
+            sb.AppendLine("[ANTIGRAVITY]");
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string agyAppDir = Path.Combine(localAppData, "Programs", "Antigravity");
+            string agyAppExe = Path.Combine(agyAppDir, "Antigravity.exe");
+            string agyLangSrv = Path.Combine(agyAppDir, "resources", "bin", "language_server.exe");
+
+            bool hasAgyApp = Directory.Exists(agyAppDir);
+            bool hasAgyExe = File.Exists(agyAppExe);
+            bool hasAgyLangSrv = File.Exists(agyLangSrv);
+
+            sb.AppendLine(string.Format("{0} Antigravity Desktop App installed: {1}", hasAgyApp ? "OK " : "BAD ", hasAgyApp ? agyAppDir : "not found"));
+            sb.AppendLine(string.Format("{0} Antigravity Desktop App exe: {1}", hasAgyExe ? "OK " : "BAD ", hasAgyExe ? agyAppExe : "not found"));
+            sb.AppendLine(string.Format("{0} Antigravity Language Server (agy): {1}", hasAgyLangSrv ? "OK " : "BAD ", hasAgyLangSrv ? agyLangSrv : "not found"));
+
+            string agyVer = RunAgyCommand("--version").Trim();
+            bool hasAgyVer = !agyVer.StartsWith("failed") && !agyVer.Contains("timed out") && !string.IsNullOrWhiteSpace(agyVer);
+            sb.AppendLine(string.Format("{0} agy CLI in PATH: {1}", hasAgyVer ? "OK " : "BAD ", hasAgyVer ? agyVer : "NOT found — install Antigravity Desktop App"));
+
+            string agyStatus = RunAgyCommand("status").Trim();
+            bool agyLoggedIn = hasAgyVer && !agyStatus.ToLower().Contains("unauthenticated") 
+                                         && !agyStatus.ToLower().Contains("login required") 
+                                         && !agyStatus.ToLower().Contains("not logged")
+                                         && !agyStatus.StartsWith("failed");
+            
+            sb.AppendLine(string.Format("{0} Antigravity auth (agy status): {1}", agyLoggedIn ? "OK " : "BAD ", 
+                hasAgyVer ? (agyLoggedIn ? agyStatus.Split('\n')[0].Trim() : "NOT logged in — run: agy login") : "agy CLI not available"));
+            
+            sb.AppendLine();
             sb.AppendLine("[SYSTEM DIAGNOSTICS]");
             sb.Append(RunCamDoctor());
 
+            bool needAgyInstall = !hasAgyApp || !hasAgyVer;
+            bool needAgyLogin = hasAgyVer && !agyLoggedIn;
+            if (needAgyInstall || needAgyLogin)
+            {
+                sb.AppendLine();
+                sb.AppendLine("[INSTALLATION ASSISTANCE]");
+                sb.AppendLine("Some Antigravity components are missing or unconfigured. Here is how to get them:");
+                if (!hasAgyApp)
+                {
+                    sb.AppendLine("\n* Antigravity Desktop App:\n  Download from https://antigravity.google/download");
+                }
+                if (!hasAgyVer)
+                {
+                    sb.AppendLine("\n* Antigravity CLI (agy):\n  Run: powershell -Command \"irm https://antigravity.google/cli/install.ps1 | iex\"");
+                }
+                if (needAgyLogin)
+                {
+                    sb.AppendLine("\n* Antigravity Authentication:\n  Run: agy login");
+                }
+            }
+
             Form statusForm = new Form();
             statusForm.Text = "Antigravity Broker Status";
-            statusForm.Size = new System.Drawing.Size(760, 560);
+            statusForm.Size = new System.Drawing.Size(760, 600);
             statusForm.MinimumSize = new System.Drawing.Size(500, 300);
             statusForm.StartPosition = FormStartPosition.CenterScreen;
             statusForm.BackColor = System.Drawing.Color.FromArgb(15, 15, 25);
@@ -96,6 +146,41 @@ namespace BridgeTray
 
             statusForm.Controls.Add(rtb);
             statusForm.ShowDialog();
+        }
+
+        private string RunAgyCommand(string arguments)
+        {
+            try
+            {
+                ProcessStartInfo processInfo = new ProcessStartInfo("agy.exe", arguments)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+
+                using (Process process = Process.Start(processInfo))
+                {
+                    if (process.WaitForExit(5000))
+                    {
+                        string output = process.StandardOutput.ReadToEnd();
+                        string error = process.StandardError.ReadToEnd();
+                        if (!string.IsNullOrWhiteSpace(error)) return output + "\n" + error;
+                        return output;
+                    }
+                    else
+                    {
+                        process.Kill();
+                        return "timed out";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return "failed: " + ex.Message;
+            }
         }
 
         private string RunCamDoctor()
