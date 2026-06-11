@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node antigravity-broker.js",
     "lint": "eslint .",
-    "build": "pkg . -t node18-win-x64 --out-path dist"
+    "build": "pkg . -t node18-win-x64 --out-path dist && C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe /target:winexe /out:dist\\bridge-tray.exe src\\tray\\BridgeTray.cs"
   },
   "keywords": [
     "codex",

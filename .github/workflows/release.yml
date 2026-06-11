@@ -36,3 +36,4 @@ jobs:
         files: |
           dist/CodexAntigravityBridgeSetup.exe
           dist/codex-antigravity-bridge.exe
+          dist/bridge-tray.exe
