@@ -1,20 +1,132 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 
-// Configuration paths
+// Dynamic Configuration paths
 const CAM_HOME = path.join(os.homedir(), ".codex-agent-manager");
 const CONFIG_FILE = path.join(CAM_HOME, "config.json");
 const TOKEN_FILE = path.join(CAM_HOME, "secrets", "local-api-token");
-
-const MAPPINGS_FILE = "C:\\Users\\kjhgf\\.gemini\\antigravity\\scratch\\broker_mappings.json";
-const AGY_EXE = "C:\\Users\\kjhgf\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe";
-const BRAIN_DIR = "C:\\Users\\kjhgf\\.gemini\\antigravity\\brain";
+const SCRATCH_DIR = path.join(os.homedir(), ".gemini", "antigravity", "scratch");
+const MAPPINGS_FILE = path.join(SCRATCH_DIR, "broker_mappings.json");
+const BRAIN_DIR = path.join(os.homedir(), ".gemini", "antigravity", "brain");
 
 const AGENT_NAME = "antigravity";
 let lastProcessedMessageId = null;
 let isProcessing = false;
+
+// Auto-Discovery of AGY Path
+function resolveAgyPath() {
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  const agyExePath = path.join(localAppData, "Programs", "Antigravity", "resources", "bin", "language_server.exe");
+  if (fs.existsSync(agyExePath)) return agyExePath;
+  return "language_server.exe"; // Fallback to system PATH
+}
+
+const AGY_EXE = resolveAgyPath();
+
+// Bootstrap / Auto-Discovery / OAuth Phase
+function bootstrapEnvironment() {
+  console.log(`\n==================================================`);
+  console.log(`[BOOTSTRAP] Verifying Codex and Antigravity Environments...`);
+  console.log(`==================================================`);
+
+  // 1. Verify Antigravity CLI (agy)
+  try {
+    execSync('agy --version', { stdio: 'ignore' });
+  } catch (e) {
+    console.error(`[BOOTSTRAP] Antigravity CLI ('agy') not found in PATH.`);
+    console.log(`[BOOTSTRAP] Please download the Antigravity Desktop App and ensure 'agy' is added to your PATH.`);
+    console.log(`[BOOTSTRAP] Make sure the language server exists at: ${AGY_EXE}`);
+  }
+
+  // 2. Verify Antigravity Auth
+  try {
+    console.log(`[BOOTSTRAP] Checking Antigravity OAuth...`);
+    const agyStatus = execSync('agy status', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (agyStatus.toLowerCase().includes('unauthenticated') || agyStatus.toLowerCase().includes('login required')) {
+      throw new Error("Needs login");
+    }
+  } catch (e) {
+    console.log(`[BOOTSTRAP] Antigravity OAuth missing or expired. Prompting login...`);
+    try {
+      execSync('agy login', { stdio: 'inherit' });
+    } catch (loginErr) {
+      console.warn(`[BOOTSTRAP] WARNING: 'agy login' failed or was cancelled. Broker may fail to route messages.`);
+    }
+  }
+
+  // 3. Verify Codex CLI
+  try {
+    console.log(`[BOOTSTRAP] Checking Codex CLI...`);
+    execSync('codex --version', { stdio: 'ignore' });
+  } catch (e) {
+    console.error(`[BOOTSTRAP] Codex CLI ('codex') not found in PATH.`);
+    console.log(`[BOOTSTRAP] To install, run: npm install -g @openai/codex-cli`);
+  }
+
+  // 4. Verify Codex Auth
+  try {
+    console.log(`[BOOTSTRAP] Checking Codex OAuth...`);
+    execSync('codex whoami', { stdio: 'ignore' });
+  } catch (e) {
+    console.log(`[BOOTSTRAP] Codex OAuth missing or expired. Prompting login...`);
+    try {
+      execSync('codex login', { stdio: 'inherit' });
+    } catch (loginErr) {
+      console.warn(`[BOOTSTRAP] WARNING: 'codex login' failed. CAM integration may fail.`);
+    }
+  }
+
+  // 5. Inject CAM Skills for Antigravity
+  console.log(`[BOOTSTRAP] Injecting CAM messaging skills into Antigravity global directory...`);
+  installAntigravitySkills();
+
+  console.log(`[BOOTSTRAP] Environment Verification Complete!\n`);
+}
+
+function installAntigravitySkills() {
+  const skillsDir = path.join(os.homedir(), ".gemini", "antigravity", "skills");
+  const camSkillDir = path.join(skillsDir, "codex-cam-messaging");
+  
+  if (!fs.existsSync(camSkillDir)) {
+    fs.mkdirSync(camSkillDir, { recursive: true });
+  }
+
+  const sourcePs1 = path.join(SCRATCH_DIR, "Send-AgentMessage.ps1");
+  const destPs1 = path.join(camSkillDir, "Send-AgentMessage.ps1");
+
+  if (fs.existsSync(sourcePs1)) {
+    fs.copyFileSync(sourcePs1, destPs1);
+  } else {
+    const defaultPs1 = `
+param (
+    [string]$TargetAgent,
+    [string]$MessageText
+)
+cd "$env:USERPROFILE\\OneDrive\\Documents\\New project\\codex-agent-manager"
+.\\cam.cmd send $TargetAgent $MessageText --from antigravity
+`;
+    fs.writeFileSync(destPs1, defaultPs1.trim(), "utf8");
+  }
+
+  const skillDef = {
+    name: "cam_send_message",
+    description: "Send a message to another Codex agent via the Codex Agent Manager (CAM) protocol. Use this to respond to incoming requests from other agents.",
+    entrypoint: "pwsh.exe -File .\\Send-AgentMessage.ps1 -TargetAgent \"{{TargetAgent}}\" -MessageText \"{{MessageText}}\"",
+    parameters: {
+      type: "object",
+      properties: {
+        TargetAgent: { type: "string", description: "The name of the target Codex agent to send the message to." },
+        MessageText: { type: "string", description: "The text body of the message." }
+      },
+      required: ["TargetAgent", "MessageText"]
+    }
+  };
+
+  fs.writeFileSync(path.join(camSkillDir, "skill.json"), JSON.stringify(skillDef, null, 2), "utf8");
+  console.log(`[BOOTSTRAP] Skill 'cam_send_message' successfully installed at ${camSkillDir}`);
+}
 
 // Helpers to get CAM config and token
 function getCamConfig() {
@@ -37,6 +149,7 @@ function getCamToken() {
 // Load/Save mappings
 function loadMappings() {
   try {
+    if (!fs.existsSync(SCRATCH_DIR)) fs.mkdirSync(SCRATCH_DIR, { recursive: true });
     if (fs.existsSync(MAPPINGS_FILE)) {
       return JSON.parse(fs.readFileSync(MAPPINGS_FILE, "utf8"));
     }
@@ -46,6 +159,7 @@ function loadMappings() {
 
 function saveMappings(mappings) {
   try {
+    if (!fs.existsSync(SCRATCH_DIR)) fs.mkdirSync(SCRATCH_DIR, { recursive: true });
     fs.writeFileSync(MAPPINGS_FILE, JSON.stringify(mappings, null, 2), "utf8");
   } catch (e) {}
 }
@@ -54,9 +168,9 @@ function saveMappings(mappings) {
 function runAgyCommand(args) {
   return new Promise((resolve, reject) => {
     const fullArgs = ["agentapi", ...args];
-    console.log(`[AGY CLI] Running language_server.exe ${fullArgs.join(" ")}`);
+    console.log(`[AGY CLI] Running ${AGY_EXE} ${fullArgs.join(" ")}`);
     const child = spawn(AGY_EXE, fullArgs, {
-      cwd: "C:\\Users\\kjhgf\\.gemini\\antigravity\\scratch",
+      cwd: SCRATCH_DIR,
       windowsHide: true,
     });
 
@@ -91,7 +205,6 @@ async function pollAgyTranscript(conversationId, startByte = 0) {
   const logFile = path.join(logDir, "transcript.jsonl");
   console.log(`[BROKER] Watching transcript: ${logFile} from byte ${startByte}`);
 
-  // Wait up to 10 seconds for the directory to be created
   let attempts = 0;
   while (!fs.existsSync(logDir) && attempts < 20) {
     await new Promise(r => setTimeout(r, 500));
@@ -109,7 +222,6 @@ async function pollAgyTranscript(conversationId, startByte = 0) {
       reject(new Error("Timeout waiting for Antigravity response"));
     }, 120000); // 2 min timeout
 
-    // Check if the file already has the response appended since startByte
     if (fs.existsSync(logFile)) {
       const currentSize = fs.statSync(logFile).size;
       if (currentSize > startByte) {
@@ -278,8 +390,11 @@ async function checkInbox() {
 }
 
 console.log(`\n==================================================`);
-console.log(`[BROKER] Antigravity-Codex Broker Daemon starting (Native Mode)...`);
+console.log(`[BROKER] Antigravity-Codex Broker Daemon starting (Bootstrapper Mode)...`);
 console.log(`==================================================\n`);
+
+// Run the bootstrapper logic
+bootstrapEnvironment();
 
 // Perform initial check to set baseline
 checkInbox();
