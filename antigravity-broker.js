@@ -82,6 +82,48 @@ function bootstrapEnvironment() {
   console.log(`[BOOTSTRAP] Injecting CAM messaging skills into Antigravity global directory...`);
   installAntigravitySkills();
 
+  // 6. Verify CAM CLI
+  try {
+    console.log(`[BOOTSTRAP] Checking Codex Agent Manager (CAM) CLI...`);
+    execSync('cam --version', { stdio: 'ignore' });
+  } catch (e) {
+    console.error(`[BOOTSTRAP] CAM CLI ('cam') not found in PATH.`);
+    console.log(`[BOOTSTRAP] Attempting to auto-install CAM via NPM...`);
+    try {
+      execSync('npm install -g codex-agent-manager', { stdio: 'inherit' });
+    } catch (installErr) {
+      console.warn(`[BOOTSTRAP] WARNING: Failed to auto-install CAM. Please install it manually or ensure 'cam' is in your PATH.`);
+    }
+  }
+
+  // 7. Auto-Register Antigravity Agent
+  try {
+    console.log(`[BOOTSTRAP] Registering Antigravity with CAM...`);
+    // Fallback logic for development environments where cam is not globally installed
+    const devCamPath = path.join(os.homedir(), "OneDrive", "Documents", "New project", "codex-agent-manager", "cam.cmd");
+    const camCmd = fs.existsSync(devCamPath) ? `"${devCamPath}"` : 'cam';
+    
+    execSync(`${camCmd} agent create antigravity --cwd "${SCRATCH_DIR}" --thread-id antigravity-session-uuid`, { stdio: 'ignore' });
+    console.log(`[BOOTSTRAP] Antigravity successfully registered with CAM.`);
+  } catch (e) {
+    console.warn(`[BOOTSTRAP] WARNING: Failed to auto-register agent with CAM. It may already exist or CAM CLI is unreachable.`);
+  }
+
+  // 8. Verify CAM Daemon Status
+  try {
+    console.log(`[BOOTSTRAP] Checking CAM Daemon status...`);
+    const devCamPath = path.join(os.homedir(), "OneDrive", "Documents", "New project", "codex-agent-manager", "cam.cmd");
+    const camCmd = fs.existsSync(devCamPath) ? `"${devCamPath}"` : 'cam';
+
+    const camStatus = execSync(`${camCmd} daemon status`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (camStatus.toLowerCase().includes('stopped') || camStatus.toLowerCase().includes('not running')) {
+      console.log(`[BOOTSTRAP] CAM Daemon is stopped. Attempting to start it...`);
+      execSync(`${camCmd} daemon start`, { stdio: 'ignore' });
+    }
+  } catch (e) {
+    console.warn(`[BOOTSTRAP] WARNING: Could not verify CAM daemon status. Make sure the CAM daemon is running in the background.`);
+  }
+
   console.log(`[BOOTSTRAP] Environment Verification Complete!\n`);
 }
 
