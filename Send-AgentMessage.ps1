@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Sends a message to a Codex agent via the Codex Agent Manager (CAM) system.
+    Sends a message to an agent via the Qexow CAM system.
 .PARAMETER Target
     The friendly command alias of the target agent (e.g. boss-master-overseer-president).
 .PARAMETER Message
@@ -16,10 +16,19 @@ param(
     [string]$Message
 )
 
-$camPath = "C:\Users\kjhgf\OneDrive\Documents\New project\codex-agent-manager"
-if (-not (Test-Path $camPath)) {
-    Write-Error "Codex Agent Manager directory not found at: $camPath"
-    return
+$camPath = $env:CAM_HOME
+if (-not $camPath) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $devPath = Resolve-Path (Join-Path $scriptDir "..\qexow-cam") -ErrorAction SilentlyContinue
+    if ($devPath -and (Test-Path $devPath.Path)) {
+        $camPath = $devPath.Path
+    } else {
+        $camPath = Join-Path $env:USERPROFILE ".qexow-cam"
+    }
+}
+
+if (-not (Test-Path $camPath) -or -not (Test-Path (Join-Path $camPath "codex-send.cmd"))) {
+    Throw "Error: Qexow CAM directory not found or invalid at '$camPath'. Fallbacks are disabled."
 }
 
 Push-Location $camPath

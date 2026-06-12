@@ -1,13 +1,69 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, execFile } from "node:child_process";
+
+// Windows Alert Helper
+function showWindowsAlert(title, message, iconType = "error") {
+  if (process.platform !== "win32") return;
+  const code = iconType === "error" ? 16 : 48;
+  const escapedMessage = String(message).replace(/"/g, '""').replace(/\r?\n/g, '" & vbCrLf & "');
+  const escapedTitle = String(title).replace(/"/g, '""');
+  const vbsCode = `vbscript:Execute("msgbox ""${escapedMessage}"", ${code}, ""${escapedTitle}""")(window.close)`;
+  execFile("mshta", [vbsCode], () => {});
+}
+
+const SCRATCH_DIR = path.join(os.homedir(), ".gemini", "antigravity", "scratch");
+const LOG_FILE = path.join(SCRATCH_DIR, "broker.log");
+
+function writeToLogFile(level, message) {
+  try {
+    if (!fs.existsSync(SCRATCH_DIR)) {
+      fs.mkdirSync(SCRATCH_DIR, { recursive: true });
+    }
+    const timestamp = new Date().toISOString();
+    const line = `[${timestamp}] [${level}] ${message}\n`;
+    fs.appendFileSync(LOG_FILE, line, "utf8");
+    // Limit log file size to ~500KB
+    const stats = fs.statSync(LOG_FILE);
+    if (stats.size > 500 * 1024) {
+      const content = fs.readFileSync(LOG_FILE, "utf8");
+      const truncated = content.slice(content.length - 250 * 1024);
+      fs.writeFileSync(LOG_FILE, truncated, "utf8");
+    }
+  } catch (e) {
+    // Ignore logging errors to prevent crash loops
+  }
+}
+
+// Global console hooks to log to file and pop up dialog boxes for all errors/warnings
+const originalConsoleLog = console.log;
+console.log = function(...args) {
+  originalConsoleLog.apply(console, args);
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  writeToLogFile("INFO", msg);
+};
+
+const originalConsoleError = console.error;
+console.error = function(...args) {
+  originalConsoleError.apply(console, args);
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  writeToLogFile("ERROR", msg);
+  showWindowsAlert("Bridge Error", msg, "error");
+};
+
+const originalConsoleWarn = console.warn;
+console.warn = function(...args) {
+  originalConsoleWarn.apply(console, args);
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  writeToLogFile("WARN", msg);
+  showWindowsAlert("Bridge Warning", msg, "warning");
+};
 
 // Dynamic Configuration paths
-const CAM_HOME = path.join(os.homedir(), ".codex-agent-manager");
+const CAM_HOME = path.join(os.homedir(), ".qexow-cam");
 const CONFIG_FILE = path.join(CAM_HOME, "config.json");
 const TOKEN_FILE = path.join(CAM_HOME, "secrets", "local-api-token");
-const SCRATCH_DIR = path.join(os.homedir(), ".gemini", "antigravity", "scratch");
 const MAPPINGS_FILE = path.join(SCRATCH_DIR, "broker_mappings.json");
 const BRAIN_DIR = path.join(os.homedir(), ".gemini", "antigravity", "brain");
 
@@ -77,27 +133,25 @@ function bootstrapEnvironment() {
 
   // 6. Verify CAM CLI
   try {
-    console.log(`[BOOTSTRAP] Checking Codex Agent Manager (CAM) CLI...`);
+    console.log(`[BOOTSTRAP] Checking Qexow CAM CLI...`);
     execSync('cam --version', { stdio: 'ignore' });
   } catch (e) {
     console.warn(`[BOOTSTRAP] WARNING: CAM CLI ('cam') not found in PATH.`);
-    console.warn(`[BOOTSTRAP] Please ensure you have downloaded and run the Codex Agent Manager Windows Installer.`);
+    console.warn(`[BOOTSTRAP] Please ensure you have downloaded and run the Qexow CAM Windows Installer.`);
     console.warn(`[BOOTSTRAP] The broker will continue polling, but injection may fail until CAM is installed.`);
   }
 
   // Determine local development CAM path dynamically
   const scriptDir = typeof __dirname !== 'undefined' ? __dirname : path.dirname(process.argv[1] || '.');
-  const devCamPath = path.resolve(scriptDir, "..", "codex-agent-manager", "cam.cmd");
+  const devCamPath = path.resolve(scriptDir, "..", "qexow-cam", "cam.cmd");
+  if (!fs.existsSync(devCamPath)) {
+    // Also check old name for backward-compat during transition
+    const legacyPath = path.resolve(scriptDir, "..", "codex-agent-manager", "cam.cmd");
+    if (fs.existsSync(legacyPath)) Object.assign({devCamPath: legacyPath});
+  }
   const camCmd = fs.existsSync(devCamPath) ? `"${devCamPath}"` : 'cam';
 
-  // 7. Auto-Register Antigravity Agent
-  try {
-    console.log(`[BOOTSTRAP] Registering Antigravity with CAM...`);
-    execSync(`${camCmd} agent create antigravity --cwd "${SCRATCH_DIR}" --thread-id antigravity-session-uuid`, { stdio: 'ignore' });
-    console.log(`[BOOTSTRAP] Antigravity successfully registered with CAM.`);
-  } catch (e) {
-    console.warn(`[BOOTSTRAP] WARNING: Failed to auto-register agent with CAM. It may already exist or CAM CLI is unreachable.`);
-  }
+  // Dynamic Antigravity agent registration is handled automatically by daemon active thread sync
 
   // 8. Verify CAM Daemon Status
   try {
@@ -116,7 +170,7 @@ function bootstrapEnvironment() {
 
 function installAntigravitySkills() {
   const skillsDir = path.join(os.homedir(), ".gemini", "antigravity", "skills");
-  const camSkillDir = path.join(skillsDir, "codex-cam-messaging");
+  const camSkillDir = path.join(skillsDir, "qexow-cam-messaging");
   
   if (!fs.existsSync(camSkillDir)) {
     fs.mkdirSync(camSkillDir, { recursive: true });
@@ -134,20 +188,22 @@ param (
     [string]$MessageText
 )
 
-$tokenFile = "$env:USERPROFILE\\.codex-agent-manager\\secrets\\local-api-token"
-$configFile = "$env:USERPROFILE\\.codex-agent-manager\\config.json"
+$tokenFile = "$env:USERPROFILE\\.qexow-cam\\secrets\\local-api-token"
+$configFile = "$env:USERPROFILE\\.qexow-cam\\config.json"
 
 if (-not (Test-Path $tokenFile)) {
-    Write-Error "CAM token file not found at $tokenFile"
-    exit 1
+    Throw "CAM token file not found at $tokenFile. Fallbacks are disabled."
+}
+if (-not (Test-Path $configFile)) {
+    Throw "CAM config file not found at $configFile. Fallbacks are disabled."
 }
 
 $token = (Get-Content $tokenFile -Raw).Trim()
-$port = 37631
-if (Test-Path $configFile) {
-    $config = Get-Content $configFile -Raw | ConvertFrom-Json
-    if ($config.port) { $port = $config.port }
+$config = Get-Content $configFile -Raw | ConvertFrom-Json
+if (-not $config.port) {
+    Throw "CAM port configuration is missing in $configFile. Fallbacks are disabled."
 }
+$port = $config.port
 
 $body = @{
     targetAgent = $TargetAgent
@@ -163,12 +219,12 @@ $response | ConvertTo-Json -Depth 5
 
   const skillDef = {
     name: "cam_send_message",
-    description: "Send a message to another Codex agent via the Codex Agent Manager (CAM) protocol. Use this to respond to incoming requests from other agents.",
+    description: "Send a message to another agent via the Qexow CAM (CAM) protocol. Use this to respond to incoming requests from other agents.",
     entrypoint: "pwsh.exe -File .\\Send-AgentMessage.ps1 -TargetAgent \"{{TargetAgent}}\" -MessageText \"{{MessageText}}\"",
     parameters: {
       type: "object",
       properties: {
-        TargetAgent: { type: "string", description: "The name of the target Codex agent to send the message to." },
+        TargetAgent: { type: "string", description: "The name of the target agent to send the message to." },
         MessageText: { type: "string", description: "The text body of the message." }
       },
       required: ["TargetAgent", "MessageText"]
@@ -179,7 +235,7 @@ $response | ConvertTo-Json -Depth 5
   console.log(`[BOOTSTRAP] Skill 'cam_send_message' successfully installed at ${camSkillDir}`);
 
   // Install Check Inbox Skill
-  const inboxSkillDir = path.join(skillsDir, "codex-cam-inbox");
+  const inboxSkillDir = path.join(skillsDir, "qexow-cam-inbox");
   if (!fs.existsSync(inboxSkillDir)) {
     fs.mkdirSync(inboxSkillDir, { recursive: true });
   }
@@ -189,20 +245,22 @@ param (
     [int]$WaitSeconds = 20
 )
 
-$tokenFile = "$env:USERPROFILE\\.codex-agent-manager\\secrets\\local-api-token"
-$configFile = "$env:USERPROFILE\\.codex-agent-manager\\config.json"
+$tokenFile = "$env:USERPROFILE\\.qexow-cam\\secrets\\local-api-token"
+$configFile = "$env:USERPROFILE\\.qexow-cam\\config.json"
 
 if (-not (Test-Path $tokenFile)) {
-    Write-Error "CAM token file not found at $tokenFile"
-    exit 1
+    Throw "CAM token file not found at $tokenFile. Fallbacks are disabled."
+}
+if (-not (Test-Path $configFile)) {
+    Throw "CAM config file not found at $configFile. Fallbacks are disabled."
 }
 
 $token = (Get-Content $tokenFile -Raw).Trim()
-$port = 37631
-if (Test-Path $configFile) {
-    $config = Get-Content $configFile -Raw | ConvertFrom-Json
-    if ($config.port) { $port = $config.port }
+$config = Get-Content $configFile -Raw | ConvertFrom-Json
+if (-not $config.port) {
+    Throw "CAM port configuration is missing in $configFile. Fallbacks are disabled."
 }
+$port = $config.port
 
 $uri = "http://127.0.0.1:$port/inbox?agent=antigravity"
 if ($WaitSeconds -gt 0) {
@@ -217,7 +275,7 @@ $response | ConvertTo-Json -Depth 5
 
   const inboxSkillDef = {
     name: "cam_check_inbox",
-    description: "Check your Codex Agent Manager (CAM) inbox for any pending messages from other agents. Set WaitSeconds to block and wait for a response if none are currently available.",
+    description: "Check your Qexow CAM inbox for any pending messages from other agents. Set WaitSeconds to block and wait for a response if none are currently available.",
     entrypoint: "pwsh.exe -File .\\Check-AgentMessages.ps1 -WaitSeconds {{WaitSeconds}}",
     parameters: {
       type: "object",
@@ -234,7 +292,7 @@ $response | ConvertTo-Json -Depth 5
 
 function installCodexSkills() {
   const skillsDir = path.join(os.homedir(), ".codex", "skills");
-  const camSkillDir = path.join(skillsDir, "codex-cam-messaging");
+  const camSkillDir = path.join(skillsDir, "qexow-cam-messaging");
   const scriptsDir = path.join(camSkillDir, "scripts");
 
   if (!fs.existsSync(scriptsDir)) {
@@ -242,12 +300,12 @@ function installCodexSkills() {
   }
 
   const skillMd = `---
-name: codex-cam-messaging
-description: Send and receive messages to/from other agents using the Codex Agent Manager (CAM) protocol.
+name: qexow-cam-messaging
+description: Send and receive messages to/from other agents using the Qexow CAM protocol.
 ---
 # Instructions
 
-You are connected to the Codex Agent Manager (CAM) messaging fabric. You can communicate with other agents (including \`antigravity\`) by running local scripts.
+You are connected to the Qexow CAM messaging fabric. You can communicate with other agents (including \`antigravity\`) by running local scripts.
 
 ## Sending a Message
 To send a message to another agent:
@@ -258,7 +316,7 @@ To send a message to another agent:
 
 **Example CLI call:**
 \`\`\`powershell
-pwsh -File "$env:USERPROFILE\\.codex\\skills\\codex-cam-messaging\\scripts\\Send-AgentMessage.ps1" -TargetAgent "antigravity" -MessageText "Hello" -SourceAgent "coder-bot"
+pwsh -File "$env:USERPROFILE\\.codex\\skills\\qexow-cam-messaging\\scripts\\Send-AgentMessage.ps1" -TargetAgent "antigravity" -MessageText "Hello" -SourceAgent "coder-bot"
 \`\`\`
 
 ## Checking Your Inbox
@@ -269,7 +327,7 @@ To check for incoming messages:
 
 **Example CLI call:**
 \`\`\`powershell
-pwsh -File "$env:USERPROFILE\\.codex\\skills\\codex-cam-messaging\\scripts\\Check-AgentMessages.ps1" -AgentName "coder-bot" -WaitSeconds 15
+pwsh -File "$env:USERPROFILE\\.codex\\skills\\qexow-cam-messaging\\scripts\\Check-AgentMessages.ps1" -AgentName "coder-bot" -WaitSeconds 15
 \`\`\`
 `;
 
@@ -280,20 +338,22 @@ param (
     [string]$SourceAgent
 )
 
-$tokenFile = "$env:USERPROFILE\\.codex-agent-manager\\secrets\\local-api-token"
-$configFile = "$env:USERPROFILE\\.codex-agent-manager\\config.json"
+$tokenFile = "$env:USERPROFILE\\.qexow-cam\\secrets\\local-api-token"
+$configFile = "$env:USERPROFILE\\.qexow-cam\\config.json"
 
 if (-not (Test-Path $tokenFile)) {
-    Write-Error "CAM token file not found at $tokenFile"
-    exit 1
+    Throw "CAM token file not found at $tokenFile. Fallbacks are disabled."
+}
+if (-not (Test-Path $configFile)) {
+    Throw "CAM config file not found at $configFile. Fallbacks are disabled."
 }
 
 $token = (Get-Content $tokenFile -Raw).Trim()
-$port = 37631
-if (Test-Path $configFile) {
-    $config = Get-Content $configFile -Raw | ConvertFrom-Json
-    if ($config.port) { $port = $config.port }
+$config = Get-Content $configFile -Raw | ConvertFrom-Json
+if (-not $config.port) {
+    Throw "CAM port configuration is missing in $configFile. Fallbacks are disabled."
 }
+$port = $config.port
 
 $body = @{
     targetAgent = $TargetAgent
@@ -311,20 +371,22 @@ param (
     [int]$WaitSeconds = 20
 )
 
-$tokenFile = "$env:USERPROFILE\\.codex-agent-manager\\secrets\\local-api-token"
-$configFile = "$env:USERPROFILE\\.codex-agent-manager\\config.json"
+$tokenFile = "$env:USERPROFILE\\.qexow-cam\\secrets\\local-api-token"
+$configFile = "$env:USERPROFILE\\.qexow-cam\\config.json"
 
 if (-not (Test-Path $tokenFile)) {
-    Write-Error "CAM token file not found at $tokenFile"
-    exit 1
+    Throw "CAM token file not found at $tokenFile. Fallbacks are disabled."
+}
+if (-not (Test-Path $configFile)) {
+    Throw "CAM config file not found at $configFile. Fallbacks are disabled."
 }
 
 $token = (Get-Content $tokenFile -Raw).Trim()
-$port = 37631
-if (Test-Path $configFile) {
-    $config = Get-Content $configFile -Raw | ConvertFrom-Json
-    if ($config.port) { $port = $config.port }
+$config = Get-Content $configFile -Raw | ConvertFrom-Json
+if (-not $config.port) {
+    Throw "CAM port configuration is missing in $configFile. Fallbacks are disabled."
 }
+$port = $config.port
 
 $uri = "http://127.0.0.1:$port/inbox?agent=$AgentName"
 if ($WaitSeconds -gt 0) {
@@ -343,20 +405,22 @@ $response | ConvertTo-Json -Depth 5
 
 // Helpers to get CAM config and token
 function getCamConfig() {
-  try {
-    const data = fs.readFileSync(CONFIG_FILE, "utf8");
-    return JSON.parse(data);
-  } catch (e) {
-    return { port: 37631 };
+  if (!fs.existsSync(CONFIG_FILE)) {
+    throw new Error(`[BROKER] Configuration file not found at ${CONFIG_FILE}. Make sure Qexow CAM is configured.`);
   }
+  const data = fs.readFileSync(CONFIG_FILE, "utf8");
+  const config = JSON.parse(data);
+  if (!config.port) {
+    throw new Error(`[BROKER] Port configuration is missing in ${CONFIG_FILE}.`);
+  }
+  return config;
 }
 
 function getCamToken() {
-  try {
-    return fs.readFileSync(TOKEN_FILE, "utf8").trim();
-  } catch (e) {
-    return "";
+  if (!fs.existsSync(TOKEN_FILE)) {
+    throw new Error(`[BROKER] Local API token file not found at ${TOKEN_FILE}. Make sure CAM daemon has initialized.`);
   }
+  return fs.readFileSync(TOKEN_FILE, "utf8").trim();
 }
 
 // Load/Save mappings
@@ -512,12 +576,12 @@ async function pollAgyTranscript(conversationId, startByte = 0) {
 }
 
 // Send message natively to CAM via REST
-async function sendCamResponse(targetAgent, messageText) {
+async function sendCamResponse(targetAgent, messageText, sourceAgent = AGENT_NAME) {
   const config = getCamConfig();
   const token = getCamToken();
   const url = `http://127.0.0.1:${config.port}/send`;
 
-  console.log(`[CAM API] Sending reply back to ${targetAgent}...`);
+  console.log(`[CAM API] Sending reply from ${sourceAgent} back to ${targetAgent}...`);
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -527,7 +591,7 @@ async function sendCamResponse(targetAgent, messageText) {
     body: JSON.stringify({
       targetAgent: targetAgent,
       message: messageText,
-      sourceAgent: AGENT_NAME
+      sourceAgent: sourceAgent
     })
   });
 
@@ -542,36 +606,36 @@ async function sendCamResponse(targetAgent, messageText) {
 }
 
 // Process an incoming Codex message
-async function processMessage(msg) {
+async function processMessage(msg, currentAgents = []) {
   isProcessing = true;
   console.log(`\n--- [NEW INCOMING MESSAGE] ---`);
   console.log(`ID: ${msg.messageId}`);
+  console.log(`To: ${msg.targetAgent}`);
   console.log(`From: ${msg.sourceAgent} @ ${msg.sourceNode}`);
   console.log(`Body: "${msg.body}"`);
   console.log(`-----------------------------`);
 
   try {
     const mappingsObj = loadMappings();
-    let conversationId = mappingsObj.conversations[msg.sourceAgent];
-    let startByte = 0;
+    let conversationId = null;
 
-    if (conversationId) {
-      console.log(`[BROKER] Reusing conversation: ${conversationId}`);
-      const logFile = path.join(BRAIN_DIR, conversationId, ".system_generated", "logs", "transcript.jsonl");
-      if (fs.existsSync(logFile)) startByte = fs.statSync(logFile).size;
-      
-      await runAgyCommand(["send-message", conversationId, msg.body]);
-    } else {
-      console.log(`[BROKER] Creating new conversation...`);
-      const result = await runAgyCommand(["new-conversation", msg.body]);
-      conversationId = result.response.newConversation.conversationId;
-      console.log(`[BROKER] Created conversation: ${conversationId}`);
-      mappingsObj.conversations[msg.sourceAgent] = conversationId;
-      saveMappings(mappingsObj);
+    // Check if target is a dynamic Antigravity agent in the CAM registry
+    const targetAgentObj = currentAgents.find(a => a.name === msg.targetAgent);
+    if (!targetAgentObj || !targetAgentObj.threadId) {
+      throw new Error(`Routing Error: Target agent '${msg.targetAgent}' is not registered or is missing a valid conversation ID.`);
     }
+    conversationId = targetAgentObj.threadId;
+    console.log(`[BROKER] Dynamic routing matched conversation: ${conversationId} for agent: ${msg.targetAgent}`);
+
+    let startByte = 0;
+    console.log(`[BROKER] Reusing conversation: ${conversationId}`);
+    const logFile = path.join(BRAIN_DIR, conversationId, ".system_generated", "logs", "transcript.jsonl");
+    if (fs.existsSync(logFile)) startByte = fs.statSync(logFile).size;
+    
+    await runAgyCommand(["send-message", conversationId, msg.body]);
 
     const reply = await pollAgyTranscript(conversationId, startByte);
-    await sendCamResponse(msg.sourceAgent, reply);
+    await sendCamResponse(msg.sourceAgent, reply, msg.targetAgent);
 
   } catch (error) {
     console.error(`[BROKER] Error processing message:`, error.message);
@@ -580,7 +644,7 @@ async function processMessage(msg) {
   }
 }
 
-// Main polling function natively calling /agents/read
+// Main polling function natively calling /agents to get all agents
 async function checkInbox() {
   if (isChecking || isProcessing) return;
   isChecking = true;
@@ -588,55 +652,59 @@ async function checkInbox() {
   try {
     const config = getCamConfig();
     const token = getCamToken();
-    const url = `http://127.0.0.1:${config.port}/agents/read?name=${AGENT_NAME}`;
+    const url = `http://127.0.0.1:${config.port}/agents`;
 
     const res = await fetch(url, {
       headers: { "Authorization": `Bearer ${token}` }
     });
 
     if (!res.ok) {
-      console.error("[BROKER] Fetch error:", res.status, await res.text());
+      console.error("[BROKER] Fetch agents error:", res.status, await res.text());
       return;
     }
     
     const data = await res.json();
-    if (!data.agent || !data.agent.lastDelivery) return;
+    if (!data.agents || !Array.isArray(data.agents)) return;
 
-    const msg = data.agent.lastDelivery;
+    // Filter agents belonging to Antigravity
+    const agyAgents = data.agents.filter(a => a.threadSource === "antigravity" || a.name === "antigravity");
     const mappingsObj = loadMappings();
 
-    if (lastProcessedMessageId === null) {
-      lastProcessedMessageId = mappingsObj.lastProcessedMessageId;
+    if (!mappingsObj.processedMessageIds) {
+      mappingsObj.processedMessageIds = [];
+      if (mappingsObj.lastProcessedMessageId) {
+        mappingsObj.processedMessageIds.push(mappingsObj.lastProcessedMessageId);
+      }
     }
+    const processedSet = new Set(mappingsObj.processedMessageIds);
 
-    if (lastProcessedMessageId === null) {
-      lastProcessedMessageId = msg.messageId;
-      mappingsObj.lastProcessedMessageId = msg.messageId;
-      saveMappings(mappingsObj);
-      console.log(`[BROKER] Initialized baseline messageId to: ${msg.messageId}`);
-      return;
-    }
-
-    if (msg.messageId !== lastProcessedMessageId) {
-      console.log(`[BROKER] New message detected: ${msg.messageId}`);
-      await processMessage(msg);
+    for (const agent of agyAgents) {
+      if (!agent.lastDelivery) continue;
+      const msg = agent.lastDelivery;
       
-      // Persist the message ID once processed/attempted
-      lastProcessedMessageId = msg.messageId;
-      const updatedMappings = loadMappings();
-      updatedMappings.lastProcessedMessageId = msg.messageId;
-      saveMappings(updatedMappings);
+      if (!processedSet.has(msg.messageId)) {
+        console.log(`[BROKER] New message detected for agent ${agent.name}: ${msg.messageId}`);
+        
+        // Add to processed set immediately to prevent duplicate runs
+        processedSet.add(msg.messageId);
+        mappingsObj.processedMessageIds = Array.from(processedSet);
+        mappingsObj.lastProcessedMessageId = msg.messageId;
+        saveMappings(mappingsObj);
+        
+        await processMessage(msg, data.agents);
+        break; // Process one message per poll cycle
+      }
     }
 
   } catch (e) {
-    console.error("[BROKER] Fetch error:", e.message);
+    console.error("[BROKER] Check inbox error:", e.message);
   } finally {
     isChecking = false;
   }
 }
 
 console.log(`\n==================================================`);
-console.log(`[BROKER] Antigravity-Codex Broker Daemon starting (Bootstrapper Mode)...`);
+console.log(`[BROKER] Antigravity-Qexow Broker Daemon starting (Bootstrapper Mode)...`);
 console.log(`==================================================\n`);
 
 // Run the bootstrapper logic

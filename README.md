@@ -1,11 +1,11 @@
-# Codex-Antigravity Native Bridge
+# Qexow Bridge — Antigravity Native Bridge
 
-This repository contains the files and instructions to create a 2-way communication bridge between the Codex Agent Manager (CAM) and the Antigravity system, turning Antigravity into a first-class agent within the Codex ecosystem.
+This repository contains the files and instructions to create a 2-way communication bridge between **Qexow CAM** and the Antigravity system, turning Antigravity into a first-class agent within the Qexow ecosystem.
 
 ## Components
 
 1. **`antigravity-broker.js`**: A Node.js daemon that natively polls CAM's `/agents/read` REST API for incoming messages, spawns Antigravity via `language_server.exe`, streams the resulting log files using `fs.watch`, and posts the responses back to CAM's `/send` endpoint.
-2. **`Send-AgentMessage.ps1`**: A modified version of the Antigravity communication script that sets the default `--from antigravity` flag, allowing the agent to send native messages to other Codex agents.
+2. **`Send-AgentMessage.ps1`**: A modified version of the Antigravity communication script that sets the default `--from antigravity` flag, allowing the agent to send native messages to other agents.
 3. **`cam_integration_instructions.md`**: A reference for the Antigravity agent on how to use the bridge.
 
 ## Installation & Setup
@@ -17,7 +17,7 @@ This repository contains the files and instructions to create a 2-way communicat
    ```
 3. Register the `antigravity` agent in CAM:
    ```powershell
-   cd path\to\codex-agent-manager
+   cd path\to\qexow-cam
    .\cam.cmd agent create antigravity --cwd "C:\Users\kjhgf\.gemini\antigravity\scratch" --thread-id antigravity-session-uuid
    ```
 

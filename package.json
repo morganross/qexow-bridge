@@ -1,7 +1,7 @@
 {
-  "name": "codex-antigravity-bridge",
+  "name": "qexow-bridge",
   "version": "1.8.0",
-  "description": "Native bridge for connecting Codex Agent Manager to Antigravity.",
+  "description": "Qexow Bridge — native bridge connecting Qexow CAM to Antigravity.",
   "main": "antigravity-broker.js",
   "type": "module",
   "bin": "antigravity-broker.js",

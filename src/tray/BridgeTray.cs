@@ -10,21 +10,183 @@ namespace BridgeTray
 {
     static class Program
     {
-        [STAThread]
-        static void Main()
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool AttachConsole(int dwProcessId);
+        private const int ATTACH_PARENT_PROCESS = -1;
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern IntPtr GetStdHandle(int nStdHandle);
+        private const int STD_OUTPUT_HANDLE = -11;
+        private const int STD_ERROR_HANDLE = -12;
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern int GetFileType(IntPtr hFile);
+        private const int FILE_TYPE_DISK = 0x0001;
+        private const int FILE_TYPE_CHAR = 0x0002;
+        private const int FILE_TYPE_PIPE = 0x0003;
+
+        internal static string GetBinDir()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new TrayApplicationContext());
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            return Path.Combine(appData, "QexowBridge", "bin");
+        }
+
+        private static void ExtractAllResources()
+        {
+            try
+            {
+                string binDir = GetBinDir();
+                ExtractResource("bridge-core.exe", Path.Combine(binDir, "bridge-core.exe"));
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Fatal: Failed to extract resources: " + ex.Message, "Bridge Resource Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Environment.Exit(1);
+            }
+        }
+
+        private static void ExtractResource(string resourceName, string targetPath)
+        {
+            var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+            string actualResourceName = assembly.GetManifestResourceNames()
+                .FirstOrDefault(name => name.EndsWith(resourceName, StringComparison.OrdinalIgnoreCase));
+
+            if (string.IsNullOrEmpty(actualResourceName))
+            {
+                throw new Exception("Resource not found in manifest: " + resourceName);
+            }
+
+            FileInfo fileInfo = new FileInfo(targetPath);
+            using (Stream stream = assembly.GetManifestResourceStream(actualResourceName))
+            {
+                if (stream == null)
+                {
+                    throw new Exception("Manifest stream is null for " + actualResourceName);
+                }
+
+                if (fileInfo.Exists && fileInfo.Length == stream.Length)
+                {
+                    return;
+                }
+
+                string dir = Path.GetDirectoryName(targetPath);
+                if (!Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                using (FileStream fileStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write))
+                {
+                    byte[] buffer = new byte[8192];
+                    int bytesRead;
+                    while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        fileStream.Write(buffer, 0, bytesRead);
+                    }
+                }
+            }
+        }
+
+        [STAThread]
+        static void Main(string[] args)
+        {
+            ExtractAllResources();
+
+            if (args.Length > 0)
+            {
+                RunCli(args);
+            }
+            else
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new TrayApplicationContext());
+            }
+        }
+
+        private static void RunCli(string[] args)
+        {
+            try
+            {
+                IntPtr stdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                int outType = GetFileType(stdOut);
+
+                if (outType != FILE_TYPE_PIPE && outType != FILE_TYPE_DISK)
+                {
+                    AttachConsole(ATTACH_PARENT_PROCESS);
+                }
+
+                try
+                {
+                    var stdOutHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+                    if (stdOutHandle != IntPtr.Zero && stdOutHandle != (IntPtr)(-1))
+                    {
+                        var safeFileHandle = new Microsoft.Win32.SafeHandles.SafeFileHandle(stdOutHandle, false);
+                        var fileStream = new FileStream(safeFileHandle, FileAccess.Write);
+                        var standardOutput = new StreamWriter(fileStream, System.Text.Encoding.Default) { AutoFlush = true };
+                        Console.SetOut(standardOutput);
+                    }
+                }
+                catch {}
+
+                try
+                {
+                    var stdErrHandle = GetStdHandle(STD_ERROR_HANDLE);
+                    if (stdErrHandle != IntPtr.Zero && stdErrHandle != (IntPtr)(-1))
+                    {
+                        var safeFileHandleErr = new Microsoft.Win32.SafeHandles.SafeFileHandle(stdErrHandle, false);
+                        var fileStreamErr = new FileStream(safeFileHandleErr, FileAccess.Write);
+                        var standardError = new StreamWriter(fileStreamErr, System.Text.Encoding.Default) { AutoFlush = true };
+                        Console.SetError(standardError);
+                    }
+                }
+                catch {}
+
+                string binDir = GetBinDir();
+                string coreExe = Path.Combine(binDir, "bridge-core.exe");
+                if (!File.Exists(coreExe))
+                {
+                    Console.Error.WriteLine("Error: bridge-core.exe not found at " + coreExe);
+                    Environment.Exit(1);
+                }
+
+                string arguments = string.Join(" ", args.Select(a => a.Contains(" ") ? "\"" + a + "\"" : a));
+                ProcessStartInfo psi = new ProcessStartInfo(coreExe, arguments)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using (Process process = Process.Start(psi))
+                {
+                    process.OutputDataReceived += (sender, e) => { if (e.Data != null) Console.Out.WriteLine(e.Data); };
+                    process.ErrorDataReceived += (sender, e) => { if (e.Data != null) Console.Error.WriteLine(e.Data); };
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+                    process.WaitForExit();
+                    try { Console.Out.Flush(); } catch {}
+                    try { Console.Error.Flush(); } catch {}
+                    Environment.Exit(process.ExitCode);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Failed to run Antigravity Bridge CLI: " + ex.Message);
+                Environment.Exit(1);
+            }
         }
     }
 
     public class TrayApplicationContext : ApplicationContext
     {
         private NotifyIcon trayIcon;
-        private const string ProcessName = "codex-antigravity-bridge";
-        private Form statusForm;
+        private const string ProcessName = "bridge-core";
+                private Form statusForm;
         private TableLayoutPanel grid;
+        private TableLayoutPanel mappingsGrid;
+        private TextBox txtLogReadout;
 
         public TrayApplicationContext()
         {
@@ -40,7 +202,7 @@ namespace BridgeTray
                 Icon = SystemIcons.Information,
                 ContextMenuStrip = contextMenu,
                 Visible = true,
-                Text = "Codex Antigravity Broker"
+                Text = "Qexow Bridge"
             };
 
             trayIcon.DoubleClick += Status_Click;
@@ -67,9 +229,9 @@ namespace BridgeTray
             }
 
             statusForm = new Form();
-            statusForm.Text = "Antigravity Broker Status";
-            statusForm.Size = new Size(760, 600);
-            statusForm.MinimumSize = new Size(600, 400);
+            statusForm.Text = "Qexow Bridge Dashboard";
+            statusForm.Size = new Size(1100, 750);
+            statusForm.MinimumSize = new Size(800, 600);
             statusForm.StartPosition = FormStartPosition.CenterScreen;
             statusForm.BackColor = Color.FromArgb(20, 20, 30);
             statusForm.ForeColor = Color.White;
@@ -83,32 +245,14 @@ namespace BridgeTray
             headerPanel.Padding = new Padding(15, 12, 15, 12);
 
             Label titleLabel = new Label();
-            titleLabel.Text = "ANTIGRAVITY BRIDGE SYSTEM STATUS";
+            titleLabel.Text = "QEXOW BRIDGE SYSTEM DASHBOARD";
             titleLabel.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
             titleLabel.ForeColor = Color.FromArgb(0, 162, 232);
             titleLabel.AutoSize = true;
             headerPanel.Controls.Add(titleLabel);
             statusForm.Controls.Add(headerPanel);
 
-            // Main Panel with Scroll
-            Panel mainPanel = new Panel();
-            mainPanel.Dock = DockStyle.Fill;
-            mainPanel.AutoScroll = true;
-            mainPanel.Padding = new Padding(20);
-            statusForm.Controls.Add(mainPanel);
-
-            grid = new TableLayoutPanel();
-            grid.ColumnCount = 4;
-            grid.Dock = DockStyle.Top;
-            grid.AutoSize = true;
-            grid.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 35F));  // Light
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35F));  // Label
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));  // Detail
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F)); // Action button
-            mainPanel.Controls.Add(grid);
-
-            // Bottom Panel
+            // Bottom Panel for Buttons
             Panel bottomPanel = new Panel();
             bottomPanel.Dock = DockStyle.Bottom;
             bottomPanel.Height = 55;
@@ -116,16 +260,20 @@ namespace BridgeTray
             bottomPanel.Padding = new Padding(15, 10, 15, 10);
 
             Button btnRefresh = new Button();
-            btnRefresh.Text = "Refresh";
+            btnRefresh.Text = "Refresh All";
             btnRefresh.FlatStyle = FlatStyle.Flat;
             btnRefresh.FlatAppearance.BorderSize = 0;
             btnRefresh.BackColor = Color.FromArgb(0, 120, 215);
             btnRefresh.ForeColor = Color.White;
             btnRefresh.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
-            btnRefresh.Width = 90;
+            btnRefresh.Width = 110;
             btnRefresh.Height = 35;
             btnRefresh.Dock = DockStyle.Left;
-            btnRefresh.Click += (s, ev) => RefreshStatusList();
+            btnRefresh.Click += (s, ev) => {
+                RefreshStatusList();
+                RefreshAgentMappingsList();
+                RefreshLogReadout();
+            };
             btnRefresh.MouseEnter += (s, ev) => btnRefresh.BackColor = Color.FromArgb(0, 140, 240);
             btnRefresh.MouseLeave += (s, ev) => btnRefresh.BackColor = Color.FromArgb(0, 120, 215);
             bottomPanel.Controls.Add(btnRefresh);
@@ -146,8 +294,113 @@ namespace BridgeTray
 
             statusForm.Controls.Add(bottomPanel);
 
+            // Outer SplitContainer splitting Top (checklist/mappings) and Bottom (logs)
+            SplitContainer outerSplit = new SplitContainer();
+            outerSplit.Dock = DockStyle.Fill;
+            outerSplit.Orientation = Orientation.Horizontal;
+            outerSplit.SplitterDistance = 430;
+            outerSplit.Panel2MinSize = 150;
+            outerSplit.Panel1MinSize = 200;
+            outerSplit.BackColor = Color.FromArgb(20, 20, 30);
+            statusForm.Controls.Add(outerSplit);
+
+            // Inner SplitContainer splitting Left (checklist) and Right (mappings)
+            SplitContainer innerSplit = new SplitContainer();
+            innerSplit.Dock = DockStyle.Fill;
+            innerSplit.Orientation = Orientation.Vertical;
+            innerSplit.SplitterDistance = 530;
+            innerSplit.Panel1MinSize = 250;
+            innerSplit.Panel2MinSize = 250;
+            innerSplit.BackColor = Color.FromArgb(20, 20, 30);
+            outerSplit.Panel1.Controls.Add(innerSplit);
+
+            // Left Panel: System Status Checklist
+            Panel leftPanel = new Panel();
+            leftPanel.Dock = DockStyle.Fill;
+            leftPanel.Padding = new Padding(15);
+            innerSplit.Panel1.Controls.Add(leftPanel);
+
+            Label lblStatusTitle = new Label();
+            lblStatusTitle.Text = "SYSTEM COMPONENT CHECKLIST";
+            lblStatusTitle.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+            lblStatusTitle.ForeColor = Color.FromArgb(180, 180, 200);
+            lblStatusTitle.Dock = DockStyle.Top;
+            lblStatusTitle.Height = 30;
+            leftPanel.Controls.Add(lblStatusTitle);
+
+            Panel leftScroll = new Panel();
+            leftScroll.Dock = DockStyle.Fill;
+            leftScroll.AutoScroll = true;
+            leftPanel.Controls.Add(leftScroll);
+
+            grid = new TableLayoutPanel();
+            grid.ColumnCount = 4;
+            grid.Dock = DockStyle.Top;
+            grid.AutoSize = true;
+            grid.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 30F));  // Light
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45F));  // Label
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55F));  // Detail
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 85F));  // Action button
+            leftScroll.Controls.Add(grid);
+
+            // Right Panel: Agent Mappings
+            Panel rightPanel = new Panel();
+            rightPanel.Dock = DockStyle.Fill;
+            rightPanel.Padding = new Padding(15);
+            innerSplit.Panel2.Controls.Add(rightPanel);
+
+            Label lblMappingsTitle = new Label();
+            lblMappingsTitle.Text = "AGENT CHAT SESSION MAPPINGS";
+            lblMappingsTitle.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+            lblMappingsTitle.ForeColor = Color.FromArgb(180, 180, 200);
+            lblMappingsTitle.Dock = DockStyle.Top;
+            lblMappingsTitle.Height = 30;
+            rightPanel.Controls.Add(lblMappingsTitle);
+
+            Panel rightScroll = new Panel();
+            rightScroll.Dock = DockStyle.Fill;
+            rightScroll.AutoScroll = true;
+            rightPanel.Controls.Add(rightScroll);
+
+            mappingsGrid = new TableLayoutPanel();
+            mappingsGrid.ColumnCount = 3;
+            mappingsGrid.Dock = DockStyle.Top;
+            mappingsGrid.AutoSize = true;
+            mappingsGrid.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            mappingsGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35F)); // Agent Name
+            mappingsGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65F)); // Conversation ID
+            mappingsGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 85F)); // Test button
+            rightScroll.Controls.Add(mappingsGrid);
+
+            // Bottom Panel: Log Readout
+            Panel logsPanel = new Panel();
+            logsPanel.Dock = DockStyle.Fill;
+            logsPanel.Padding = new Padding(15, 5, 15, 10);
+            outerSplit.Panel2.Controls.Add(logsPanel);
+
+            Label lblLogTitle = new Label();
+            lblLogTitle.Text = "LIVE BRIDGE LOG READOUT (LAST 40 LINES)";
+            lblLogTitle.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            lblLogTitle.ForeColor = Color.FromArgb(180, 180, 200);
+            lblLogTitle.Dock = DockStyle.Top;
+            lblLogTitle.Height = 25;
+            logsPanel.Controls.Add(lblLogTitle);
+
+            txtLogReadout = new TextBox();
+            txtLogReadout.Multiline = true;
+            txtLogReadout.ReadOnly = true;
+            txtLogReadout.ScrollBars = ScrollBars.Vertical;
+            txtLogReadout.BackColor = Color.FromArgb(10, 10, 15);
+            txtLogReadout.ForeColor = Color.LightGreen;
+            txtLogReadout.Font = new Font("Consolas", 8.5f);
+            txtLogReadout.Dock = DockStyle.Fill;
+            logsPanel.Controls.Add(txtLogReadout);
+
             // Initial Load
             RefreshStatusList();
+            RefreshAgentMappingsList();
+            RefreshLogReadout();
 
             statusForm.ShowDialog();
         }
@@ -400,6 +653,306 @@ namespace BridgeTray
             }
         }
 
+        private void RefreshAgentMappingsList()
+        {
+            mappingsGrid.Controls.Clear();
+            mappingsGrid.RowStyles.Clear();
+            mappingsGrid.RowCount = 0;
+
+            var mappings = GetAgentMappings();
+            int rowIdx = 0;
+
+            if (mappings.Count == 0)
+            {
+                mappingsGrid.RowCount++;
+                mappingsGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 35F));
+
+                Label lblNoMappings = new Label();
+                lblNoMappings.Text = "No active agent mappings found.";
+                lblNoMappings.Font = new Font("Segoe UI", 9.5f, FontStyle.Italic);
+                lblNoMappings.ForeColor = Color.DarkGray;
+                lblNoMappings.TextAlign = ContentAlignment.MiddleLeft;
+                lblNoMappings.Dock = DockStyle.Fill;
+                
+                mappingsGrid.Controls.Add(lblNoMappings, 0, rowIdx);
+                mappingsGrid.SetColumnSpan(lblNoMappings, 3);
+                return;
+            }
+
+            foreach (var kvp in mappings)
+            {
+                string agentName = kvp.Key;
+                string conversationId = kvp.Value;
+
+                mappingsGrid.RowCount++;
+                mappingsGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 35F));
+
+                // 1. Agent Name
+                Label lblName = new Label();
+                lblName.Text = agentName;
+                lblName.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+                lblName.ForeColor = Color.FromArgb(0, 162, 232);
+                lblName.TextAlign = ContentAlignment.MiddleLeft;
+                lblName.Dock = DockStyle.Fill;
+                mappingsGrid.Controls.Add(lblName, 0, rowIdx);
+
+                // 2. Conversation ID
+                Label lblId = new Label();
+                lblId.Text = conversationId;
+                lblId.Font = new Font("Consolas", 9f);
+                lblId.ForeColor = Color.LightGray;
+                lblId.TextAlign = ContentAlignment.MiddleLeft;
+                lblId.Dock = DockStyle.Fill;
+                
+                ToolTip toolTip = new ToolTip();
+                toolTip.SetToolTip(lblId, conversationId);
+                
+                mappingsGrid.Controls.Add(lblId, 1, rowIdx);
+
+                // 3. Test Button
+                Button btnTest = new Button();
+                btnTest.Text = "Test";
+                btnTest.FlatStyle = FlatStyle.Flat;
+                btnTest.FlatAppearance.BorderSize = 0;
+                btnTest.BackColor = Color.FromArgb(0, 122, 204);
+                btnTest.ForeColor = Color.White;
+                btnTest.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+                btnTest.Height = 25;
+                btnTest.Dock = DockStyle.Fill;
+                btnTest.Click += (s, ev) => RunStatusTest(agentName, conversationId, btnTest);
+                btnTest.MouseEnter += (s, ev) => { if (btnTest.Enabled) btnTest.BackColor = Color.FromArgb(28, 151, 234); };
+                btnTest.MouseLeave += (s, ev) => { if (btnTest.Enabled) btnTest.BackColor = Color.FromArgb(0, 122, 204); };
+                
+                mappingsGrid.Controls.Add(btnTest, 2, rowIdx);
+
+                rowIdx++;
+            }
+        }
+
+        private void RefreshLogReadout()
+        {
+            try
+            {
+                string scratchDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "antigravity", "scratch");
+                string logFile = Path.Combine(scratchDir, "broker.log");
+                if (File.Exists(logFile))
+                {
+                    using (var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        long size = fs.Length;
+                        long start = Math.Max(0, size - 20000); // last ~20KB
+                        fs.Seek(start, SeekOrigin.Begin);
+                        using (var reader = new StreamReader(fs))
+                        {
+                            string raw = reader.ReadToEnd();
+                            string[] lines = raw.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                            int skip = Math.Max(0, lines.Length - 40);
+                            string display = string.Join(Environment.NewLine, lines.Skip(skip));
+                            txtLogReadout.Text = display;
+                            txtLogReadout.SelectionStart = txtLogReadout.Text.Length;
+                            txtLogReadout.ScrollToCaret();
+                        }
+                    }
+                }
+                else
+                {
+                    txtLogReadout.Text = "No logs generated yet. Ensure the broker is running.";
+                }
+            }
+            catch (Exception ex)
+            {
+                txtLogReadout.Text = "Error reading logs: " + ex.Message;
+            }
+        }
+
+        private Dictionary<string, string> GetAgentMappings()
+        {
+            var mappings = new Dictionary<string, string>();
+            try
+            {
+                string scratchDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "antigravity", "scratch");
+                string file = Path.Combine(scratchDir, "broker_mappings.json");
+                if (File.Exists(file))
+                {
+                    string content = File.ReadAllText(file);
+                    int startIdx = content.IndexOf("\"conversations\":");
+                    if (startIdx >= 0)
+                    {
+                        int openBrace = content.IndexOf("{", startIdx);
+                        int closeBrace = content.IndexOf("}", openBrace);
+                        if (openBrace >= 0 && closeBrace > openBrace)
+                        {
+                            string section = content.Substring(openBrace + 1, closeBrace - openBrace - 1);
+                            string[] lines = section.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                            foreach (var line in lines)
+                            {
+                                int colonIdx = line.IndexOf(':');
+                                if (colonIdx >= 0)
+                                {
+                                    string key = line.Substring(0, colonIdx).Trim().Trim('"', ',');
+                                    string val = line.Substring(colonIdx + 1).Trim().Trim('"', ',');
+                                    if (!string.IsNullOrEmpty(key) && !string.IsNullOrEmpty(val))
+                                    {
+                                        mappings[key] = val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch {}
+            return mappings;
+        }
+
+        private void RunStatusTest(string agentName, string conversationId, Button btnTest)
+        {
+            btnTest.Enabled = false;
+            btnTest.Text = "Sending...";
+            
+            System.Threading.Tasks.Task.Run(() => {
+                try
+                {
+                    string userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    string logFile = Path.Combine(userHome, ".gemini", "antigravity", "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
+                    
+                    long startByte = 0;
+                    if (File.Exists(logFile))
+                    {
+                        startByte = new FileInfo(logFile).Length;
+                    }
+                    
+                    string arg = string.Format("agentapi send-message {0} \"what is your status\"", conversationId);
+                    string sendResult = RunAgyLangSrvCommand(arg);
+                    
+                    if (sendResult.StartsWith("failed") || sendResult.Contains("timed out"))
+                    {
+                        statusForm.BeginInvoke(new Action(() => {
+                            MessageBox.Show("Failed to send status test message: " + sendResult, "Test Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            btnTest.Enabled = true;
+                            btnTest.Text = "Test";
+                        }));
+                        return;
+                    }
+                    
+                    statusForm.BeginInvoke(new Action(() => {
+                        btnTest.Text = "Waiting...";
+                    }));
+                    
+                    bool responseFound = false;
+                    string responseText = "";
+                    
+                    for (int i = 0; i < 40; i++) // up to 20 seconds
+                    {
+                        System.Threading.Thread.Sleep(500);
+                        
+                        if (File.Exists(logFile))
+                        {
+                            long currentSize = new FileInfo(logFile).Length;
+                            if (currentSize > startByte)
+                            {
+                                try
+                                {
+                                    using (var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                                    {
+                                        fs.Seek(startByte, SeekOrigin.Begin);
+                                        using (var reader = new StreamReader(fs))
+                                        {
+                                            string text = reader.ReadToEnd();
+                                            string[] lines = text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                                            foreach (var line in lines)
+                                            {
+                                                if (line.Contains("\"MODEL\"") && line.Contains("\"PLANNER_RESPONSE\"") && line.Contains("\"DONE\""))
+                                                {
+                                                    int contentIdx = line.IndexOf("\"content\":\"");
+                                                    if (contentIdx >= 0)
+                                                    {
+                                                        int start = contentIdx + 11;
+                                                        int end = line.IndexOf("\"", start);
+                                                        if (end > start)
+                                                        {
+                                                            responseText = line.Substring(start, end - start);
+                                                            responseText = System.Text.RegularExpressions.Regex.Unescape(responseText);
+                                                            responseFound = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch {}
+                            }
+                        }
+                        
+                        if (responseFound) break;
+                    }
+                    
+                    statusForm.BeginInvoke(new Action(() => {
+                        btnTest.Enabled = true;
+                        btnTest.Text = "Test";
+                        if (responseFound)
+                        {
+                            MessageBox.Show(string.Format("Agent: {0}\nStatus Response:\n\n{1}", agentName, responseText), "Test Response Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                        else
+                        {
+                            MessageBox.Show("Timed out waiting for agent response in chat session transcript.", "Test Timeout", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    statusForm.BeginInvoke(new Action(() => {
+                        MessageBox.Show("Error running test: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        btnTest.Enabled = true;
+                        btnTest.Text = "Test";
+                    }));
+                }
+            });
+        }
+
+        private string RunAgyLangSrvCommand(string arguments)
+        {
+            try
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string agyLangSrv = Path.Combine(localAppData, "Programs", "Antigravity", "resources", "bin", "language_server.exe");
+                if (!File.Exists(agyLangSrv)) return "Language server not found at " + agyLangSrv;
+
+                ProcessStartInfo processInfo = new ProcessStartInfo(agyLangSrv, arguments)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    WorkingDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "antigravity", "scratch")
+                };
+
+                using (Process process = Process.Start(processInfo))
+                {
+                    if (process.WaitForExit(10000))
+                    {
+                        string output = process.StandardOutput.ReadToEnd();
+                        string error = process.StandardError.ReadToEnd();
+                        if (!string.IsNullOrWhiteSpace(error)) return output + "\n" + error;
+                        return output;
+                    }
+                    else
+                    {
+                        process.Kill();
+                        return "timed out";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return "failed: " + ex.Message;
+            }
+        }
+
         private string RunAgyCommand(string arguments)
         {
             try
@@ -441,7 +994,7 @@ namespace BridgeTray
             {
                 string camPath = "cam.exe"; // Try path first
                 string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-                string candidate = Path.Combine(progFiles, "Codex Agent Manager", "cam.exe");
+                string candidate = Path.Combine(progFiles, "Qexow CAM", "cam.exe");
                 if (File.Exists(candidate))
                 {
                     camPath = candidate;
@@ -449,7 +1002,7 @@ namespace BridgeTray
                 else
                 {
                     string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-                    candidate = Path.Combine(progFilesX86, "Codex Agent Manager", "cam.exe");
+                    candidate = Path.Combine(progFilesX86, "Qexow CAM", "cam.exe");
                     if (File.Exists(candidate))
                     {
                         camPath = candidate;
@@ -486,7 +1039,7 @@ namespace BridgeTray
             }
             catch (Exception ex)
             {
-                return "BAD Codex Agent Manager: cam.exe not found or failed to execute (" + ex.Message + "). Please install Codex Agent Manager.";
+                return "BAD Qexow CAM: cam.exe not found or failed to execute (" + ex.Message + "). Please install Qexow CAM.";
             }
         }
 
@@ -499,8 +1052,8 @@ namespace BridgeTray
 
             try
             {
-                string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-                string brokerExe = Path.Combine(exeDir, ProcessName + ".exe");
+                string binDir = Program.GetBinDir();
+                string brokerExe = Path.Combine(binDir, ProcessName + ".exe");
 
                 if (!File.Exists(brokerExe))
                 {
