@@ -1,6 +1,6 @@
 {
   "name": "codex-antigravity-bridge",
-  "version": "1.0.0",
+  "version": "1.8.0",
   "description": "Native bridge for connecting Codex Agent Manager to Antigravity.",
   "main": "antigravity-broker.js",
   "type": "module",
